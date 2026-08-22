@@ -37,10 +37,6 @@
       padding: 12px;
     }
 
-    /* =========================
-       完成画面
-       ========================= */
-
     .stage {
       position: relative;
 
@@ -53,7 +49,7 @@
       overflow: hidden;
     }
 
-    /* ① 青い背景パネル */
+    /* ① 背景パネル */
     #backgroundPanel {
       position: absolute;
       inset: 0;
@@ -92,7 +88,7 @@
       z-index: 3;
     }
 
-    /* 撮影後の完成写真 */
+    /* 撮影後の完成画像 */
     #preview {
       position: absolute;
       inset: 0;
@@ -107,12 +103,7 @@
       z-index: 4;
     }
 
-
-    /* =========================
-       AI処理用
-       ユーザーには見せない
-       ========================= */
-
+    /* AI処理用。画面には出さない */
     #video,
     #inputCanvas,
     #maskCanvas,
@@ -120,11 +111,6 @@
     #outputCanvas {
       display: none;
     }
-
-
-    /* =========================
-       UI
-       ========================= */
 
     #status {
       margin-bottom: 10px;
@@ -179,13 +165,12 @@
     AIモデルを準備中...
   </div>
 
-
   <div class="stage">
 
     <!-- ① 背景 -->
     <img
       id="backgroundPanel"
-      src="./背景パネル.png"
+      src="./background.png"
       alt=""
     >
 
@@ -195,7 +180,7 @@
     <!-- ③ 鳥 -->
     <img
       id="birdOverlay"
-      src="./鳥.png"
+      src="./bird.png"
       alt=""
     >
 
@@ -208,7 +193,6 @@
   </div>
 
 
-  <!-- 元カメラ -->
   <video
     id="video"
     autoplay
@@ -217,12 +201,9 @@
   ></video>
 
 
-  <!-- AI処理用 -->
   <canvas id="inputCanvas"></canvas>
   <canvas id="maskCanvas"></canvas>
   <canvas id="cutoutCanvas"></canvas>
-
-  <!-- 最終保存 -->
   <canvas id="outputCanvas"></canvas>
 
 
@@ -262,10 +243,6 @@
     } from
     "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/+esm";
 
-
-    /* =========================
-       要素
-       ========================= */
 
     const video =
       document.getElementById("video");
@@ -325,35 +302,11 @@
       document.getElementById("status");
 
 
-    /* =========================
-       設定
-       ========================= */
-
     const FINAL_WIDTH = 1080;
     const FINAL_HEIGHT = 1350;
 
-    /*
-      AI処理は軽くするため
-      小さい4:5で実行する。
-
-      ここを大きくすると
-      境界は少し綺麗になるが重くなる。
-    */
-
     const AI_WIDTH = 360;
     const AI_HEIGHT = 450;
-
-    /*
-      人物境界の調整。
-
-      値を低くする
-      → 髪や顔が消えにくい
-      → 背景が少し残りやすい
-
-      値を高くする
-      → 背景は消える
-      → 髪などが欠けやすい
-    */
 
     const MASK_LOW = 0.12;
     const MASK_HIGH = 0.52;
@@ -371,10 +324,10 @@
 
     let cameraStarted = false;
 
+    let lastProcessTime = 0;
 
-    /* =========================
-       AI準備
-       ========================= */
+    const PROCESS_INTERVAL = 80;
+
 
     async function setupSegmenter() {
 
@@ -382,42 +335,28 @@
 
         const vision =
           await FilesetResolver.forVisionTasks(
-
             "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/wasm"
-
           );
 
 
         imageSegmenter =
           await ImageSegmenter.createFromOptions(
-
             vision,
-
             {
-
               baseOptions: {
 
                 modelAssetPath:
-
                   "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite",
 
                 delegate: "GPU"
-
               },
 
               runningMode: "IMAGE",
 
-              /*
-                今回はcategory maskではなく
-                confidence maskを使う。
-              */
-
               outputCategoryMask: false,
 
               outputConfidenceMasks: true
-
             }
-
           );
 
 
@@ -439,10 +378,6 @@
 
     setupSegmenter();
 
-
-    /* =========================
-       カメラ停止
-       ========================= */
 
     function stopCamera() {
 
@@ -469,13 +404,8 @@
 
 
       cameraStarted = false;
-
     }
 
-
-    /* =========================
-       カメラ開始
-       ========================= */
 
     async function startCamera() {
 
@@ -560,10 +490,6 @@
     }
 
 
-    /* =========================
-       カメラ切替
-       ========================= */
-
     async function switchCamera() {
 
       currentFacing =
@@ -573,14 +499,8 @@
 
 
       await startCamera();
-
     }
 
-
-    /* =========================
-       元カメラを
-       4:5へ中央トリミング
-       ========================= */
 
     function drawCameraIntoInput() {
 
@@ -658,11 +578,6 @@
       inputCtx.save();
 
 
-      /*
-        インカメは
-        スマホの鏡表示に合わせる
-      */
-
       if (
         currentFacing === "user"
       ) {
@@ -702,14 +617,8 @@
 
 
       return true;
-
     }
 
-
-    /* =========================
-       smoothstep
-       人物境界を自然にする
-       ========================= */
 
     function smoothstep(
       low,
@@ -737,13 +646,8 @@
         x *
         (3 - 2 * x)
       );
-
     }
 
-
-    /* =========================
-       AIマスクから人物を作る
-       ========================= */
 
     function buildPersonFromResult(
       result
@@ -755,19 +659,8 @@
       ) {
 
         return;
-
       }
 
-
-      /*
-        selfie_multiclassモデルでは
-        confidenceMasks[0] が背景。
-
-        なので
-
-        人物らしさ =
-        1 - 背景らしさ
-      */
 
       const backgroundMask =
         result.confidenceMasks[0];
@@ -810,11 +703,6 @@
           bgConfidence[i];
 
 
-        /*
-          白黒ではなく
-          0〜255で滑らかな透明度にする
-        */
-
         const alpha =
           Math.round(
 
@@ -844,7 +732,6 @@
 
         maskImage.data[p + 3] =
           alpha;
-
       }
 
 
@@ -854,11 +741,6 @@
         0
       );
 
-
-      /* -------------------------
-         カメラ画像とマスクを
-         同じサイズで合成
-         ------------------------- */
 
       cutoutCanvas.width =
         AI_WIDTH;
@@ -875,10 +757,6 @@
       );
 
 
-      /*
-        まず4:5のカメラ映像を描く
-      */
-
       cutoutCtx.drawImage(
         inputCanvas,
         0,
@@ -887,11 +765,6 @@
         AI_HEIGHT
       );
 
-
-      /*
-        そのあとAIマスクで
-        背景を透明にする
-      */
 
       cutoutCtx.globalCompositeOperation =
         "destination-in";
@@ -917,10 +790,6 @@
       cutoutCtx.globalCompositeOperation =
         "source-over";
 
-
-      /* -------------------------
-         表示用を1080×1350へ
-         ------------------------- */
 
       personCanvas.width =
         FINAL_WIDTH;
@@ -958,13 +827,8 @@
         FINAL_HEIGHT
 
       );
-
     }
 
-
-    /* =========================
-       1回AI処理
-       ========================= */
 
     function processFrame() {
 
@@ -991,9 +855,7 @@
 
 
       imageSegmenter.segment(
-
         inputCanvas,
-
         function(result) {
 
           try {
@@ -1020,25 +882,9 @@
 
           processing =
             false;
-
         }
-
       );
-
     }
-
-
-    /* =========================
-       リアルタイム処理
-
-       毎フレームAIにかけると
-       スマホが重くなるので
-       少し間隔を空ける。
-       ========================= */
-
-    let lastProcessTime = 0;
-
-    const PROCESS_INTERVAL = 80;
 
 
     function renderLoop(
@@ -1062,7 +908,6 @@
           time;
 
         processFrame();
-
       }
 
 
@@ -1070,13 +915,8 @@
         requestAnimationFrame(
           renderLoop
         );
-
     }
 
-
-    /* =========================
-       撮影
-       ========================= */
 
     function takePhoto() {
 
@@ -1105,54 +945,33 @@
       );
 
 
-      /*
-        ① 青背景
-      */
-
+      /* ① 背景 */
       outputCtx.drawImage(
-
         backgroundPanel,
-
         0,
         0,
-
         FINAL_WIDTH,
         FINAL_HEIGHT
-
       );
 
 
-      /*
-        ② 人物
-      */
-
+      /* ② 人物 */
       outputCtx.drawImage(
-
         personCanvas,
-
         0,
         0,
-
         FINAL_WIDTH,
         FINAL_HEIGHT
-
       );
 
 
-      /*
-        ③ 鳥
-      */
-
+      /* ③ 鳥 */
       outputCtx.drawImage(
-
         birdOverlay,
-
         0,
         0,
-
         FINAL_WIDTH,
         FINAL_HEIGHT
-
       );
 
 
@@ -1184,13 +1003,8 @@
 
       status.textContent =
         "撮影しました";
-
     }
 
-
-    /* =========================
-       撮り直し
-       ========================= */
 
     function retakePhoto() {
 
@@ -1210,13 +1024,8 @@
         currentFacing === "user"
           ? "インカメ"
           : "外カメ";
-
     }
 
-
-    /* =========================
-       ボタン
-       ========================= */
 
     document
       .getElementById(

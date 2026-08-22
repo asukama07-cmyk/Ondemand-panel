@@ -1,0 +1,1261 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+  <meta charset="UTF-8">
+
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1, viewport-fit=cover"
+  >
+
+  <title>Photo Frame</title>
+
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      margin: 0;
+      width: 100%;
+      min-height: 100%;
+      background: #000;
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+
+    body {
+      min-height: 100dvh;
+
+      display: flex;
+      flex-direction: column;
+
+      align-items: center;
+      justify-content: center;
+
+      padding: 12px;
+    }
+
+    /* =========================
+       完成画面
+       ========================= */
+
+    .stage {
+      position: relative;
+
+      width: min(100vw, 540px);
+
+      aspect-ratio: 4 / 5;
+
+      background: #111;
+
+      overflow: hidden;
+    }
+
+    /* ① 青い背景パネル */
+    #backgroundPanel {
+      position: absolute;
+      inset: 0;
+
+      width: 100%;
+      height: 100%;
+
+      object-fit: cover;
+
+      z-index: 1;
+    }
+
+    /* ② AIで切り抜いた人物 */
+    #personCanvas {
+      position: absolute;
+      inset: 0;
+
+      width: 100%;
+      height: 100%;
+
+      z-index: 2;
+    }
+
+    /* ③ 鳥 */
+    #birdOverlay {
+      position: absolute;
+      inset: 0;
+
+      width: 100%;
+      height: 100%;
+
+      object-fit: contain;
+
+      pointer-events: none;
+
+      z-index: 3;
+    }
+
+    /* 撮影後の完成写真 */
+    #preview {
+      position: absolute;
+      inset: 0;
+
+      width: 100%;
+      height: 100%;
+
+      object-fit: cover;
+
+      display: none;
+
+      z-index: 4;
+    }
+
+
+    /* =========================
+       AI処理用
+       ユーザーには見せない
+       ========================= */
+
+    #video,
+    #inputCanvas,
+    #maskCanvas,
+    #cutoutCanvas,
+    #outputCanvas {
+      display: none;
+    }
+
+
+    /* =========================
+       UI
+       ========================= */
+
+    #status {
+      margin-bottom: 10px;
+
+      color: #fff;
+
+      font-size: 14px;
+
+      text-align: center;
+    }
+
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+
+      justify-content: center;
+
+      gap: 10px;
+
+      margin-top: 14px;
+    }
+
+    button,
+    #downloadLink {
+      border: none;
+
+      border-radius: 999px;
+
+      padding: 12px 18px;
+
+      font-size: 16px;
+
+      background: #fff;
+      color: #000;
+
+      text-decoration: none;
+
+      cursor: pointer;
+    }
+
+    #downloadLink,
+    #retakeBtn {
+      display: none;
+    }
+  </style>
+</head>
+
+
+<body>
+
+  <div id="status">
+    AIモデルを準備中...
+  </div>
+
+
+  <div class="stage">
+
+    <!-- ① 背景 -->
+    <img
+      id="backgroundPanel"
+      src="./背景パネル.png"
+      alt=""
+    >
+
+    <!-- ② 人物 -->
+    <canvas id="personCanvas"></canvas>
+
+    <!-- ③ 鳥 -->
+    <img
+      id="birdOverlay"
+      src="./鳥.png"
+      alt=""
+    >
+
+    <!-- 撮影後 -->
+    <img
+      id="preview"
+      alt=""
+    >
+
+  </div>
+
+
+  <!-- 元カメラ -->
+  <video
+    id="video"
+    autoplay
+    playsinline
+    muted
+  ></video>
+
+
+  <!-- AI処理用 -->
+  <canvas id="inputCanvas"></canvas>
+  <canvas id="maskCanvas"></canvas>
+  <canvas id="cutoutCanvas"></canvas>
+
+  <!-- 最終保存 -->
+  <canvas id="outputCanvas"></canvas>
+
+
+  <div class="controls">
+
+    <button id="startBtn">
+      カメラ開始
+    </button>
+
+    <button id="switchBtn">
+      カメラ切替
+    </button>
+
+    <button id="shotBtn">
+      撮影
+    </button>
+
+    <button id="retakeBtn">
+      撮り直す
+    </button>
+
+    <a
+      id="downloadLink"
+      download="photo.png"
+    >
+      画像を保存
+    </a>
+
+  </div>
+
+
+  <script type="module">
+
+    import {
+      FilesetResolver,
+      ImageSegmenter
+    } from
+    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/+esm";
+
+
+    /* =========================
+       要素
+       ========================= */
+
+    const video =
+      document.getElementById("video");
+
+    const inputCanvas =
+      document.getElementById("inputCanvas");
+
+    const inputCtx =
+      inputCanvas.getContext(
+        "2d",
+        { willReadFrequently: true }
+      );
+
+    const maskCanvas =
+      document.getElementById("maskCanvas");
+
+    const maskCtx =
+      maskCanvas.getContext(
+        "2d",
+        { willReadFrequently: true }
+      );
+
+    const cutoutCanvas =
+      document.getElementById("cutoutCanvas");
+
+    const cutoutCtx =
+      cutoutCanvas.getContext("2d");
+
+    const personCanvas =
+      document.getElementById("personCanvas");
+
+    const personCtx =
+      personCanvas.getContext("2d");
+
+    const outputCanvas =
+      document.getElementById("outputCanvas");
+
+    const outputCtx =
+      outputCanvas.getContext("2d");
+
+    const backgroundPanel =
+      document.getElementById("backgroundPanel");
+
+    const birdOverlay =
+      document.getElementById("birdOverlay");
+
+    const preview =
+      document.getElementById("preview");
+
+    const downloadLink =
+      document.getElementById("downloadLink");
+
+    const retakeBtn =
+      document.getElementById("retakeBtn");
+
+    const status =
+      document.getElementById("status");
+
+
+    /* =========================
+       設定
+       ========================= */
+
+    const FINAL_WIDTH = 1080;
+    const FINAL_HEIGHT = 1350;
+
+    /*
+      AI処理は軽くするため
+      小さい4:5で実行する。
+
+      ここを大きくすると
+      境界は少し綺麗になるが重くなる。
+    */
+
+    const AI_WIDTH = 360;
+    const AI_HEIGHT = 450;
+
+    /*
+      人物境界の調整。
+
+      値を低くする
+      → 髪や顔が消えにくい
+      → 背景が少し残りやすい
+
+      値を高くする
+      → 背景は消える
+      → 髪などが欠けやすい
+    */
+
+    const MASK_LOW = 0.12;
+    const MASK_HIGH = 0.52;
+
+
+    let currentFacing = "user";
+
+    let currentStream = null;
+
+    let imageSegmenter = null;
+
+    let animationId = null;
+
+    let processing = false;
+
+    let cameraStarted = false;
+
+
+    /* =========================
+       AI準備
+       ========================= */
+
+    async function setupSegmenter() {
+
+      try {
+
+        const vision =
+          await FilesetResolver.forVisionTasks(
+
+            "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/wasm"
+
+          );
+
+
+        imageSegmenter =
+          await ImageSegmenter.createFromOptions(
+
+            vision,
+
+            {
+
+              baseOptions: {
+
+                modelAssetPath:
+
+                  "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite",
+
+                delegate: "GPU"
+
+              },
+
+              runningMode: "IMAGE",
+
+              /*
+                今回はcategory maskではなく
+                confidence maskを使う。
+              */
+
+              outputCategoryMask: false,
+
+              outputConfidenceMasks: true
+
+            }
+
+          );
+
+
+        status.textContent =
+          "準備完了。カメラ開始を押してください。";
+
+
+      } catch (error) {
+
+        console.error(error);
+
+        status.textContent =
+          "AIモデルを読み込めませんでした。";
+
+      }
+
+    }
+
+
+    setupSegmenter();
+
+
+    /* =========================
+       カメラ停止
+       ========================= */
+
+    function stopCamera() {
+
+      if (currentStream) {
+
+        currentStream
+          .getTracks()
+          .forEach(
+            track => track.stop()
+          );
+
+        currentStream = null;
+      }
+
+
+      if (animationId) {
+
+        cancelAnimationFrame(
+          animationId
+        );
+
+        animationId = null;
+      }
+
+
+      cameraStarted = false;
+
+    }
+
+
+    /* =========================
+       カメラ開始
+       ========================= */
+
+    async function startCamera() {
+
+      if (!imageSegmenter) {
+
+        alert(
+          "AIモデルをまだ準備中です。少し待ってください。"
+        );
+
+        return;
+      }
+
+
+      try {
+
+        stopCamera();
+
+
+        currentStream =
+          await navigator.mediaDevices.getUserMedia({
+
+            audio: false,
+
+            video: {
+
+              facingMode: {
+                ideal: currentFacing
+              },
+
+              width: {
+                ideal: 1280
+              },
+
+              height: {
+                ideal: 720
+              }
+
+            }
+
+          });
+
+
+        video.srcObject =
+          currentStream;
+
+
+        await video.play();
+
+
+        cameraStarted = true;
+
+
+        preview.style.display =
+          "none";
+
+        downloadLink.style.display =
+          "none";
+
+        retakeBtn.style.display =
+          "none";
+
+
+        status.textContent =
+          currentFacing === "user"
+            ? "インカメ"
+            : "外カメ";
+
+
+        renderLoop();
+
+
+      } catch (error) {
+
+        console.error(error);
+
+        alert(
+          "カメラを起動できませんでした。カメラ使用を許可してください。"
+        );
+
+      }
+
+    }
+
+
+    /* =========================
+       カメラ切替
+       ========================= */
+
+    async function switchCamera() {
+
+      currentFacing =
+        currentFacing === "user"
+          ? "environment"
+          : "user";
+
+
+      await startCamera();
+
+    }
+
+
+    /* =========================
+       元カメラを
+       4:5へ中央トリミング
+       ========================= */
+
+    function drawCameraIntoInput() {
+
+      if (
+        !video.videoWidth ||
+        !video.videoHeight
+      ) {
+        return false;
+      }
+
+
+      inputCanvas.width =
+        AI_WIDTH;
+
+      inputCanvas.height =
+        AI_HEIGHT;
+
+
+      const sourceWidth =
+        video.videoWidth;
+
+      const sourceHeight =
+        video.videoHeight;
+
+
+      const sourceRatio =
+        sourceWidth / sourceHeight;
+
+      const targetRatio =
+        AI_WIDTH / AI_HEIGHT;
+
+
+      let sx = 0;
+      let sy = 0;
+
+      let sw =
+        sourceWidth;
+
+      let sh =
+        sourceHeight;
+
+
+      if (
+        sourceRatio >
+        targetRatio
+      ) {
+
+        sw =
+          sourceHeight *
+          targetRatio;
+
+        sx =
+          (sourceWidth - sw) / 2;
+
+      } else {
+
+        sh =
+          sourceWidth /
+          targetRatio;
+
+        sy =
+          (sourceHeight - sh) / 2;
+
+      }
+
+
+      inputCtx.clearRect(
+        0,
+        0,
+        AI_WIDTH,
+        AI_HEIGHT
+      );
+
+
+      inputCtx.save();
+
+
+      /*
+        インカメは
+        スマホの鏡表示に合わせる
+      */
+
+      if (
+        currentFacing === "user"
+      ) {
+
+        inputCtx.translate(
+          AI_WIDTH,
+          0
+        );
+
+        inputCtx.scale(
+          -1,
+          1
+        );
+
+      }
+
+
+      inputCtx.drawImage(
+
+        video,
+
+        sx,
+        sy,
+        sw,
+        sh,
+
+        0,
+        0,
+
+        AI_WIDTH,
+        AI_HEIGHT
+
+      );
+
+
+      inputCtx.restore();
+
+
+      return true;
+
+    }
+
+
+    /* =========================
+       smoothstep
+       人物境界を自然にする
+       ========================= */
+
+    function smoothstep(
+      low,
+      high,
+      value
+    ) {
+
+      let x =
+        (value - low) /
+        (high - low);
+
+
+      x =
+        Math.max(
+          0,
+          Math.min(
+            1,
+            x
+          )
+        );
+
+
+      return (
+        x *
+        x *
+        (3 - 2 * x)
+      );
+
+    }
+
+
+    /* =========================
+       AIマスクから人物を作る
+       ========================= */
+
+    function buildPersonFromResult(
+      result
+    ) {
+
+      if (
+        !result.confidenceMasks ||
+        result.confidenceMasks.length === 0
+      ) {
+
+        return;
+
+      }
+
+
+      /*
+        selfie_multiclassモデルでは
+        confidenceMasks[0] が背景。
+
+        なので
+
+        人物らしさ =
+        1 - 背景らしさ
+      */
+
+      const backgroundMask =
+        result.confidenceMasks[0];
+
+
+      const bgConfidence =
+        backgroundMask
+          .getAsFloat32Array();
+
+
+      const maskWidth =
+        backgroundMask.width;
+
+      const maskHeight =
+        backgroundMask.height;
+
+
+      maskCanvas.width =
+        maskWidth;
+
+      maskCanvas.height =
+        maskHeight;
+
+
+      const maskImage =
+        maskCtx.createImageData(
+          maskWidth,
+          maskHeight
+        );
+
+
+      for (
+        let i = 0;
+        i < bgConfidence.length;
+        i++
+      ) {
+
+        const personConfidence =
+          1 -
+          bgConfidence[i];
+
+
+        /*
+          白黒ではなく
+          0〜255で滑らかな透明度にする
+        */
+
+        const alpha =
+          Math.round(
+
+            smoothstep(
+              MASK_LOW,
+              MASK_HIGH,
+              personConfidence
+            )
+
+            * 255
+
+          );
+
+
+        const p =
+          i * 4;
+
+
+        maskImage.data[p] =
+          255;
+
+        maskImage.data[p + 1] =
+          255;
+
+        maskImage.data[p + 2] =
+          255;
+
+        maskImage.data[p + 3] =
+          alpha;
+
+      }
+
+
+      maskCtx.putImageData(
+        maskImage,
+        0,
+        0
+      );
+
+
+      /* -------------------------
+         カメラ画像とマスクを
+         同じサイズで合成
+         ------------------------- */
+
+      cutoutCanvas.width =
+        AI_WIDTH;
+
+      cutoutCanvas.height =
+        AI_HEIGHT;
+
+
+      cutoutCtx.clearRect(
+        0,
+        0,
+        AI_WIDTH,
+        AI_HEIGHT
+      );
+
+
+      /*
+        まず4:5のカメラ映像を描く
+      */
+
+      cutoutCtx.drawImage(
+        inputCanvas,
+        0,
+        0,
+        AI_WIDTH,
+        AI_HEIGHT
+      );
+
+
+      /*
+        そのあとAIマスクで
+        背景を透明にする
+      */
+
+      cutoutCtx.globalCompositeOperation =
+        "destination-in";
+
+
+      cutoutCtx.drawImage(
+        maskCanvas,
+
+        0,
+        0,
+
+        maskWidth,
+        maskHeight,
+
+        0,
+        0,
+
+        AI_WIDTH,
+        AI_HEIGHT
+      );
+
+
+      cutoutCtx.globalCompositeOperation =
+        "source-over";
+
+
+      /* -------------------------
+         表示用を1080×1350へ
+         ------------------------- */
+
+      personCanvas.width =
+        FINAL_WIDTH;
+
+      personCanvas.height =
+        FINAL_HEIGHT;
+
+
+      personCtx.clearRect(
+        0,
+        0,
+        FINAL_WIDTH,
+        FINAL_HEIGHT
+      );
+
+
+      personCtx.imageSmoothingEnabled =
+        true;
+
+
+      personCtx.drawImage(
+
+        cutoutCanvas,
+
+        0,
+        0,
+
+        AI_WIDTH,
+        AI_HEIGHT,
+
+        0,
+        0,
+
+        FINAL_WIDTH,
+        FINAL_HEIGHT
+
+      );
+
+    }
+
+
+    /* =========================
+       1回AI処理
+       ========================= */
+
+    function processFrame() {
+
+      if (
+        processing ||
+        !cameraStarted ||
+        !imageSegmenter
+      ) {
+        return;
+      }
+
+
+      const ready =
+        drawCameraIntoInput();
+
+
+      if (!ready) {
+        return;
+      }
+
+
+      processing =
+        true;
+
+
+      imageSegmenter.segment(
+
+        inputCanvas,
+
+        function(result) {
+
+          try {
+
+            buildPersonFromResult(
+              result
+            );
+
+          } catch (error) {
+
+            console.error(
+              error
+            );
+
+          }
+
+
+          try {
+
+            result.close();
+
+          } catch (e) {}
+
+
+          processing =
+            false;
+
+        }
+
+      );
+
+    }
+
+
+    /* =========================
+       リアルタイム処理
+
+       毎フレームAIにかけると
+       スマホが重くなるので
+       少し間隔を空ける。
+       ========================= */
+
+    let lastProcessTime = 0;
+
+    const PROCESS_INTERVAL = 80;
+
+
+    function renderLoop(
+      time = 0
+    ) {
+
+      if (
+        !cameraStarted
+      ) {
+        return;
+      }
+
+
+      if (
+        time -
+        lastProcessTime >=
+        PROCESS_INTERVAL
+      ) {
+
+        lastProcessTime =
+          time;
+
+        processFrame();
+
+      }
+
+
+      animationId =
+        requestAnimationFrame(
+          renderLoop
+        );
+
+    }
+
+
+    /* =========================
+       撮影
+       ========================= */
+
+    function takePhoto() {
+
+      if (!cameraStarted) {
+
+        alert(
+          "先にカメラを開始してください。"
+        );
+
+        return;
+      }
+
+
+      outputCanvas.width =
+        FINAL_WIDTH;
+
+      outputCanvas.height =
+        FINAL_HEIGHT;
+
+
+      outputCtx.clearRect(
+        0,
+        0,
+        FINAL_WIDTH,
+        FINAL_HEIGHT
+      );
+
+
+      /*
+        ① 青背景
+      */
+
+      outputCtx.drawImage(
+
+        backgroundPanel,
+
+        0,
+        0,
+
+        FINAL_WIDTH,
+        FINAL_HEIGHT
+
+      );
+
+
+      /*
+        ② 人物
+      */
+
+      outputCtx.drawImage(
+
+        personCanvas,
+
+        0,
+        0,
+
+        FINAL_WIDTH,
+        FINAL_HEIGHT
+
+      );
+
+
+      /*
+        ③ 鳥
+      */
+
+      outputCtx.drawImage(
+
+        birdOverlay,
+
+        0,
+        0,
+
+        FINAL_WIDTH,
+        FINAL_HEIGHT
+
+      );
+
+
+      const image =
+        outputCanvas.toDataURL(
+          "image/png"
+        );
+
+
+      preview.src =
+        image;
+
+
+      preview.style.display =
+        "block";
+
+
+      downloadLink.href =
+        image;
+
+
+      downloadLink.style.display =
+        "inline-block";
+
+
+      retakeBtn.style.display =
+        "inline-block";
+
+
+      status.textContent =
+        "撮影しました";
+
+    }
+
+
+    /* =========================
+       撮り直し
+       ========================= */
+
+    function retakePhoto() {
+
+      preview.style.display =
+        "none";
+
+
+      downloadLink.style.display =
+        "none";
+
+
+      retakeBtn.style.display =
+        "none";
+
+
+      status.textContent =
+        currentFacing === "user"
+          ? "インカメ"
+          : "外カメ";
+
+    }
+
+
+    /* =========================
+       ボタン
+       ========================= */
+
+    document
+      .getElementById(
+        "startBtn"
+      )
+      .addEventListener(
+        "click",
+        startCamera
+      );
+
+
+    document
+      .getElementById(
+        "switchBtn"
+      )
+      .addEventListener(
+        "click",
+        switchCamera
+      );
+
+
+    document
+      .getElementById(
+        "shotBtn"
+      )
+      .addEventListener(
+        "click",
+        takePhoto
+      );
+
+
+    retakeBtn
+      .addEventListener(
+        "click",
+        retakePhoto
+      );
+
+  </script>
+
+</body>
+
+</html>
